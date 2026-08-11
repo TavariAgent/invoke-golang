@@ -8,7 +8,7 @@ A structured concurrency engine for Go. Invoke partitions work across three sema
 
 ## Install
 
-    go get github.com/tavariagent/invoke-golang
+    go get github.com/TavariAgent/invoke-golang
 
 ---
 
@@ -135,7 +135,7 @@ the idle gaps that cap smaller batches.
 
 The hPool scheduler uses a two-axis coordinate: `Group` (integer) and `Order` (float64). The design channels each task into its correct position by phase — Group establishes the phase, Order establishes the channel within that phase.
 
-```go
+```
 type Priority struct {
     Group int     // higher group runs first — phased execution
     Order float64 // position within the group — fractional channels
@@ -148,7 +148,7 @@ type Priority struct {
 
 Floats work unilaterally — any valid float64 is a legal Order value. Ascending, descending, arbitrary spacing, and mid-sequence insertion are all equivalent operations to the heap:
 
-```go
+```
 // ascending sequence — natural pipeline order
 factory.AssignH(invoke.Priority{Group: 1, Order: 0.1}, fnA)
 factory.AssignH(invoke.Priority{Group: 1, Order: 0.2}, fnB)
@@ -178,7 +178,7 @@ Invoke exposes a string-keyed command dispatch layer with two-way type enforceme
 
 `T` is the trust boundary. It is declared inside the method signature — not inferred from the first result at runtime, not supplied by the caller over the network. The method signature is where `T` lives and where it is locked. Once registered, `T` becomes `R` — the known type the system expects to receive back from that command. The separation happens at the edge of the method signature: the developer writes `(PrimeResult, error)`, the engine reads `PrimeResult` as `R` at registration time, and every result produced by that command is checked against `R` before it crosses any boundary. The caller never touches `T` directly. The network never sees an unnarrowed value.
 
-```go
+```
 table := invoke.NewCommandTable(engine, factory)
 
 // T = PrimeResult — declared in the method signature, captured once
@@ -199,14 +199,14 @@ table.Seal()  // vault closed — no registration possible after this line
 
 This eliminates a class of attack against networked threading interfaces: a caller cannot coerce the system into producing a compound type that embeds an unexpected payload, because `R` is package-path qualified — structural matches from external packages are rejected by identity, not by field comparison. The method signature wrote the rule. The seal made it permanent.
 
-```go
+```
 // wire the table to HTTP
 mux := http.NewServeMux()
 table.ServeHTTP(mux)
 http.ListenAndServe(":29871", mux)
 ```
 
-```bash
+```
 curl http://localhost:29871/command/prime?n=999983
 # {"command":"prime","result":{"n":999983,"is_prime":true,"elapsed":"1.2ms"}}
 
@@ -218,7 +218,7 @@ curl http://localhost:29871/commands
 
 ## Config Reference
 
-```go
+```
 invoke.Config{
     IWorkers:     4,              // dedicated iPool workers
     ICoreWorkers: 8,              // iCore receipt lane workers (default: NumCPU)
@@ -239,7 +239,7 @@ The engine exposes a calibrated fractional timer at `engine.Timer`. On startup, 
 
 The unit produced is approximated nanoseconds: real elapsed time in microseconds converted to nanoseconds, plus a synthetic fractional offset derived from sequence position and tick size. The offset is strictly metric — it scales proportionally to the measured OS resolution rather than a fixed constant. On Windows (tick ~15ms), tasks completing within a single tick receive readable ordered timestamps rather than uniform zeros. On Linux (tick ~1ms or lower), the fractional offset becomes negligible and real elapsed time dominates.
 
-```go
+```
 engine.Timer.ReadUs()   // approximated nanoseconds — real elapsed + fractional offset
 engine.Timer.Reset()    // reset origin and sequence counter
 engine.Timer.TickUs()   // measured OS tick size in microseconds — logged at Start()
@@ -270,7 +270,7 @@ invoke-logs/drops-2026-08-11-175423.log
 
 ## Calibration
 
-```go
+```
 rec := engine.CalibrateIdempotent(50_000, 2*time.Second)
 fmt.Printf("throughput  : %d tasks/s\n", rec.Throughput)
 fmt.Printf("min workers : %d\n", rec.MinWorkers)
@@ -283,7 +283,7 @@ Calibration runs a measured batch through the iPool and returns recommended work
 
 ## Quick Start
 
-```go
+```
 engine := invoke.NewEngine(invoke.Config{
     IWorkers: 4,  // These should be along the same lines as total cores per-system
     PWorkers: 2,  // Leave a couple open for hPool
