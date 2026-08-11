@@ -1,0 +1,97 @@
+# --- Binaries ---------------------------------------------------------------
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# --- Go build output --------------------------------------------------------
+/bin/
+/dist/
+/build/
+
+# --- Go module cache --------------------------------------------------------
+vendor/
+
+# --- Test and coverage ------------------------------------------------------
+*.prof
+coverage.out
+coverage.html
+cpu.prof
+mem.prof
+
+# --- Invoke runtime output --------------------------------------------------
+invoke-logs/
+
+# --- VS Code ----------------------------------------------------------------
+.vscode/
+*.code-workspace
+
+# --- JetBrains (GoLand, IntelliJ) -------------------------------------------
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# --- Vim / Neovim -----------------------------------------------------------
+*.swp
+*.swo
+*~
+.netrwhist
+tags
+Session.vim
+
+# --- Emacs ------------------------------------------------------------------
+\#*\#
+.\#*
+*.elc
+auto-save-list
+tramp
+
+# --- Sublime Text -----------------------------------------------------------
+*.sublime-project
+*.sublime-workspace
+
+# --- macOS ------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# --- Windows ----------------------------------------------------------------
+Thumbs.db
+Thumbs.db:encdata
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# --- Linux ------------------------------------------------------------------
+.directory
+.Trash-*
+
+# --- Environment and secrets ------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+*.p12
+secrets.json
+config.local.go
+
+# --- Logs -------------------------------------------------------------------
+*.log
+logs/
+
+# --- Temporary files --------------------------------------------------------
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
