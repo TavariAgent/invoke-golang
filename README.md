@@ -31,7 +31,7 @@ The ceiling is worker-bound, not scheduler-bound. The engine does not become the
 
 ### Three pools
 
-Invoke separates work into three pools at submission time, not at runtime. Each pool makes assumptions about its workload that reduce synchronization cost.
+Invoke separates work into three pools at submission time, not at runtime. Each pool makes assumptions about its workload that reduce synchronization cost. All pools share the same structural primitives — mutex, condition variable, unbounded queue, stop channel, and drop counter — and follow the same operational discipline. What differs is the scheduling strategy each pool applies to its queue.
 
 ```
 iPool — idempotent work
@@ -42,11 +42,11 @@ iPool — idempotent work
 rPool — command receipt (iCore technicality)
     Not a standalone pool. The iPool splits off a second internal queue
     (rQueue) drained by dedicated iCore workers — one per logical core
-    by default. This lane handles command receipt exclusively: parsing
-    incoming command strings, resolving registrations, and dispatching
-    to the correct pool. iCore workers share the iPool stop channel but
-    hold no lock shared with standard iPool workers. The split means
-    command traffic cannot starve general idempotent work and general
+    by default (runtime.NumCPU()). This lane handles command receipt
+    exclusively: parsing incoming command strings, resolving registrations,
+    and dispatching to the correct pool. iCore workers share the iPool stop
+    channel but hold no lock shared with standard iPool workers. The split
+    means command traffic cannot starve general idempotent work and general
     work cannot delay command receipt. From the outside it presents as
     AssignR on the factory — internally it is the iPool's second lane.
 
@@ -57,16 +57,13 @@ pPool — protocol work
 
 hPool — harmonic work
     Variable elapsed time, static difficulty class.
-    Priority-scheduled via min-heap. Workers pull highest priority next.
-    Channels tasks into the correct order by phase after group.
+    Priority-scheduled via min-heap. Workers pull the lowest-coordinate
+    task next. Lower Group number = earlier phase; lower Order = earlier
+    within that phase.
     Examples: prime checks, recursive computation, variable-depth search.
 ```
 
 The separation is not organizational. A pPool task that blocks on a network call does not hold a worker that an iPool task needs. Each pool is an independent queue with independent workers and an independent condition variable.
-
-### iCore lane
-
-The iPool carries a second internal queue — the `rQueue` — drained by dedicated iCore workers. iCore workers handle command receipt: parsing, registration lookup, and dispatch. They share the iPool's stop channel but contend on no shared lock with standard iPool workers. iCore count defaults to `runtime.NumCPU()`.
 
 ### Unbounded queues
 
@@ -76,29 +73,15 @@ All three pools use unbounded queues. There is no backpressure, no blocking subm
 
 ## Pools
 
-### What are they?
-
-Each pool is a self-contained worker queue with its own lock, condition variable, goroutines, and drop counter. Invoke ships with four effective pools:
-
-**Idempotent (iPool)** handles deterministic, repeatable work — tasks that produce the same result given the same input and are safe to retry. SHA256, HMAC, salt generation, encoding. Work that has no side effects on the system state.
-
-**Command (rPool / iCore)** is the iPool's receipt lane. It handles the intake side of the typed command interface — parsing, registration lookup, type validation, and dispatch. It lives inside the iPool as a second queue rather than as a standalone pool, which means command receipt inherits iPool's worker discipline without competing with it for goroutines.
-
-**Protocol (pPool)** handles IO-bound work that spends most of its time blocked — TCP connections, DNS resolution, network handshakes. It is isolated precisely because a blocked goroutine waiting on a syscall should not occupy a slot that CPU-bound work needs.
-
-**Harmonic (hPool)** handles work with variable elapsed time but static difficulty class. A prime check on 100 and a prime check on 7,999,999 are the same category of work — the hPool accepts both and the priority heap determines which worker picks up next.
-
 ### Why do they exist?
 
 The pools are an entropy patch to the CPU's processing space. A single goroutine pool running mixed work creates invisible contention: IO-bound tasks hold workers while they block, CPU-bound tasks queue behind them, and the scheduler has no information to make better decisions. Throughput degrades non-linearly as the mix varies.
 
-Separating work by category gives each pool a homogeneous queue. Workers in the iPool always find CPU work ready. Workers in the pPool are expected to block — that is their job. The hPool's heap ensures that when a worker is free, it picks the highest-value task available rather than the next in arrival order. Each pool optimises for its own workload without interfering with the others.
+Separating work by category gives each pool a homogeneous queue. Workers in the iPool always find CPU work ready. Workers in the pPool are expected to block — that is their job. The hPool's heap ensures that when a worker is free, it picks the lowest-coordinate task available rather than the next in arrival order. Each pool optimises for its own workload without interfering with the others.
 
 ### Can there be more?
 
 Yes. The pool pattern is not closed. Adding a new pool type manually requires three things: a task struct with a `run()` method, a pool struct with a mutex, condition variable, queue, stop channel, and drop counter, and a corresponding `Assign` method on the factory. The existing pools are the canonical implementations — a new pool follows the same structure. There is no registration system to update; pools are wired directly into the engine and factory at construction.
-
-A use case for a fourth pool might be batch work — tasks submitted in groups where ordering within the group matters but groups themselves are independent. The iPool handles individual idempotent tasks. A bPool would accept slices of tasks and drain them with internal sequencing before accepting the next batch.
 
 ### What are the limits?
 
@@ -133,31 +116,31 @@ the idle gaps that cap smaller batches.
 
 ## Priority System
 
-The hPool scheduler uses a two-axis coordinate: `Group` (integer) and `Order` (float64). The design channels each task into its correct position by phase — Group establishes the phase, Order establishes the channel within that phase.
+The hPool scheduler uses a two-axis coordinate: `Group` (integer) and `Order` (float64). Both axes sort ascending — lower values run first. Group establishes the phase; Order establishes the channel within that phase.
 
-```
+```go
 type Priority struct {
-    Group int     // higher group runs first — phased execution
-    Order float64 // position within the group — fractional channels
+    Group int     // lower group runs first — phased execution
+    Order float64 // position within the group — lower runs first
 }
 ```
 
-**Group** partitions work into execution phases. All tasks in Group 3 are exhausted before any Group 1 task reaches a worker. Groups can represent pipeline stages, urgency tiers, or dependency phases.
+**Group** partitions work into execution phases. All tasks in Group 1 are exhausted before any Group 2 task reaches a worker. Groups can represent pipeline stages, urgency tiers, or dependency phases.
 
 **Order** subdivides each group into a continuous sequence of fractional channels. A float64 provides approximately 2⁵³ distinct positions between any two integers. Tasks can be inserted between any two existing positions without renumbering — the sequence is infinitely subdivisible.
 
 Floats work unilaterally — any valid float64 is a legal Order value. Ascending, descending, arbitrary spacing, and mid-sequence insertion are all equivalent operations to the heap:
 
-```
-// ascending sequence — natural pipeline order
+```go
+// ascending sequence — tasks run A → B → C within Group 1
 factory.AssignH(invoke.Priority{Group: 1, Order: 0.1}, fnA)
 factory.AssignH(invoke.Priority{Group: 1, Order: 0.2}, fnB)
 factory.AssignH(invoke.Priority{Group: 1, Order: 0.3}, fnC)
 
 // insert between existing positions — no renumbering needed
-factory.AssignH(invoke.Priority{Group: 1, Order: 0.15}, fnX)
+factory.AssignH(invoke.Priority{Group: 1, Order: 0.15}, fnX) // runs after A, before B
 
-// large spacing — room for future insertion at any granularity
+// Group 2 begins only after all Group 1 tasks are exhausted
 factory.AssignH(invoke.Priority{Group: 2, Order: 1.0}, fnD)
 factory.AssignH(invoke.Priority{Group: 2, Order: 2.0}, fnE)
 factory.AssignH(invoke.Priority{Group: 2, Order: 1.5}, fnF) // inserts between D and E
@@ -178,7 +161,7 @@ Invoke exposes a string-keyed command dispatch layer with two-way type enforceme
 
 `T` is the trust boundary. It is declared inside the method signature — not inferred from the first result at runtime, not supplied by the caller over the network. The method signature is where `T` lives and where it is locked. Once registered, `T` becomes `R` — the known type the system expects to receive back from that command. The separation happens at the edge of the method signature: the developer writes `(PrimeResult, error)`, the engine reads `PrimeResult` as `R` at registration time, and every result produced by that command is checked against `R` before it crosses any boundary. The caller never touches `T` directly. The network never sees an unnarrowed value.
 
-```
+```go
 table := invoke.NewCommandTable(engine, factory)
 
 // T = PrimeResult — declared in the method signature, captured once
@@ -199,7 +182,7 @@ table.Seal()  // vault closed — no registration possible after this line
 
 This eliminates a class of attack against networked threading interfaces: a caller cannot coerce the system into producing a compound type that embeds an unexpected payload, because `R` is package-path qualified — structural matches from external packages are rejected by identity, not by field comparison. The method signature wrote the rule. The seal made it permanent.
 
-```
+```go
 // wire the table to HTTP
 mux := http.NewServeMux()
 table.ServeHTTP(mux)
@@ -218,7 +201,7 @@ curl http://localhost:29871/commands
 
 ## Config Reference
 
-```
+```go
 invoke.Config{
     IWorkers:     4,              // dedicated iPool workers
     ICoreWorkers: 8,              // iCore receipt lane workers (default: NumCPU)
@@ -239,7 +222,7 @@ The engine exposes a calibrated fractional timer at `engine.Timer`. On startup, 
 
 The unit produced is approximated nanoseconds: real elapsed time in microseconds converted to nanoseconds, plus a synthetic fractional offset derived from sequence position and tick size. The offset is strictly metric — it scales proportionally to the measured OS resolution rather than a fixed constant. On Windows (tick ~15ms), tasks completing within a single tick receive readable ordered timestamps rather than uniform zeros. On Linux (tick ~1ms or lower), the fractional offset becomes negligible and real elapsed time dominates.
 
-```
+```go
 engine.Timer.ReadUs()   // approximated nanoseconds — real elapsed + fractional offset
 engine.Timer.Reset()    // reset origin and sequence counter
 engine.Timer.TickUs()   // measured OS tick size in microseconds — logged at Start()
@@ -270,7 +253,7 @@ invoke-logs/drops-2026-08-11-175423.log
 
 ## Calibration
 
-```
+```go
 rec := engine.CalibrateIdempotent(50_000, 2*time.Second)
 fmt.Printf("throughput  : %d tasks/s\n", rec.Throughput)
 fmt.Printf("min workers : %d\n", rec.MinWorkers)
@@ -283,7 +266,7 @@ Calibration runs a measured batch through the iPool and returns recommended work
 
 ## Quick Start
 
-```
+```go
 engine := invoke.NewEngine(invoke.Config{
     IWorkers: 4,  // These should be along the same lines as total cores per-system
     PWorkers: 2,  // Leave a couple open for hPool
@@ -305,12 +288,10 @@ factory.AssignP(func() {
     _, _ = net.LookupHost("localhost")
 })
 
-// harmonic — priority scheduled, Group 3 runs before Group 1
-factory.AssignH(invoke.Priority{Group: 3, Order: 0.1}, fnHighPriority)
-factory.AssignH(invoke.Priority{Group: 1, Order: 0.5}, fnLowPriority)
-// Applying the order is how it's possible to filter tasks inside the groups
-
-// insert between existing positions at any depth — floats are unilateral
+// harmonic — priority scheduled, Group 1 runs before Group 3
+factory.AssignH(invoke.Priority{Group: 1, Order: 0.1}, fnHighPriority)
+factory.AssignH(invoke.Priority{Group: 3, Order: 0.5}, fnLowPriority)
+// Order subdivides within a group — lower Order runs first
 factory.AssignH(invoke.Priority{Group: 1, Order: 0.25}, fnMidPriority)
 factory.AssignH(invoke.Priority{Group: 1, Order: 0.125}, fnBetween)
 
@@ -346,4 +327,4 @@ http.ListenAndServe(":29871", mux)
 ---
 ## License
 
-MIT 
+MIT
