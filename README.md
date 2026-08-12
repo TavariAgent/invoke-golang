@@ -151,7 +151,30 @@ factory.AssignH(invoke.Priority{Group: 3, Order: 0.0}, fnG)
 
 Ordering is a property declared at submission time, not computed under contention. The heap sorts what it receives. There is no runtime coordination problem because the sequence was established before the task entered the system.
 
-At 10 billion concurrent tasks, Group/Order parity is preserved. The float coordinate space does not saturate.
+At 10 billion concurrent tasks, Group/Order coordinates remain precise. The float coordinate space does not saturate.
+
+### Parity condition
+
+Two tasks with identical `Group` and `Order` are indistinguishable to the heap. The heap cannot manufacture an ordering between them — execution order is undefined and governed by whichever worker happens to pop next under concurrent drain.
+
+```go
+// all three land at Group:0 Order:0.0 — immediate parity condition
+factory.AssignH(invoke.Priority{}, fnA)
+factory.AssignH(invoke.Priority{}, fnB)
+factory.AssignH(invoke.Priority{}, fnC)
+```
+
+The heap sees three equal entries. It pops them in whatever order its internal state produces under concurrent push — fnA, fnB, fnC may complete as fnB, fnA, fnC or any permutation. Any pipeline assumption built on their sequence silently breaks.
+
+The fix is always the same: assign distinct Order values to tasks that must run in a defined sequence, even if they share a Group.
+
+```go
+factory.AssignH(invoke.Priority{Group: 1, Order: 0.1}, fnA)
+factory.AssignH(invoke.Priority{Group: 1, Order: 0.2}, fnB)
+factory.AssignH(invoke.Priority{Group: 1, Order: 0.3}, fnC)
+```
+
+A secondary risk applies when re-submitting to hPool from inside an hPool command handler and blocking on the result. The calling goroutine holds a worker slot while waiting for a child task that needs its own slot. If all workers are occupied with parents doing the same, no child can be scheduled — deadlock. Route sub-work to iPool or pPool where possible, or run it inline in the current goroutine rather than re-submitting.
 
 ---
 
@@ -264,13 +287,36 @@ Calibration runs a measured batch through the iPool and returns recommended work
 
 ---
 
+## Test Harness
+
+The `testharness/` package covers four run modes. All share the same engine config and factory.
+
+```
+go run ./testharness/                — calibrate + protocol + idempotent + harmonic + dictionary race
+go run ./testharness/ demo           — raw throughput across all three pools, 10,000 tasks default
+go run ./testharness/ demo 50000     — custom batch size
+go run ./testharness/ demo ramp      — escalating batch sizes until ceiling found
+go run ./testharness/ serve          — HTTP command server on :29871
+go run ./testharness/ drops          — drops batcher demo + scatter routing + parity test on :29872
+```
+
+**Default harness** runs a calibration pass, a real TCP echo handshake through pPool, eight HMAC-SHA256 signatures and a hash composer through iPool, four Fibonacci computations (fib(35)–fib(38)) through hPool, and a dictionary prefix-search race simulating keypress latency against iPool throughput.
+
+**Demo mode** builds a mixed batch — SHA256 hashing (iPool, ~60%), prime checks (hPool, ~30%), DNS lookups (pPool, ~10%) — and measures raw throughput. Ramp mode escalates batch size until the drop rate signals a ceiling.
+
+**Serve mode** registers four typed commands — `hash`, `prime`, `fib`, `ping` — over HTTP. The `/test/ordering` endpoint fires 20 heavy primes at Group 2 and 5 lightweight pings at Group 1 concurrently, confirming that Group 1 pings surface before Group 2 primes regardless of submission order.
+
+**Drops mode** demonstrates three things in sequence. First, typed matrix commands returning both JSON and CSV from the same computation, grouped by priority phase — Group 1 (squared) drains before Group 3 (transposed) begins. Second, the scatter pattern: a single command handler running in an hPool goroutine that routes sub-work explicitly to iPool (SHA-256 hash), pPool (simulated IO wait), and runs the remaining computation inline rather than re-submitting to hPool. Third, the parity condition live: Group 1 tasks with distinct Orders complete in deterministic ascending sequence; Group 3 tasks sharing `Order: 0.0` complete in undefined order regardless of submission index.
+
+---
+
 ## Quick Start
 
 ```go
 engine := invoke.NewEngine(invoke.Config{
-    IWorkers: 4,  // These should be along the same lines as total cores per-system
-    PWorkers: 2,  // Leave a couple open for hPool
-    Allocate: invoke.AllocateAll,  // remaining cores go to hPool
+IWorkers: 4,  // These should be along the same lines as total cores per-system
+PWorkers: 2,  // Leave a couple open for hPool
+Allocate: invoke.AllocateAll,  // remaining cores go to hPool
 })
 engine.Start()
 defer engine.Stop()
@@ -279,13 +325,13 @@ factory := invoke.NewFactory(engine)
 
 // idempotent — deterministic, repeatable
 factory.AssignI(func() {
-    h := sha256.Sum256([]byte("input"))
-    _ = hex.EncodeToString(h[:])
+h := sha256.Sum256([]byte("input"))
+_ = hex.EncodeToString(h[:])
 })
 
 // protocol — IO-bound, isolated from CPU pools
 factory.AssignP(func() {
-    _, _ = net.LookupHost("localhost")
+_, _ = net.LookupHost("localhost")
 })
 
 // harmonic — priority scheduled, Group 1 runs before Group 3
@@ -298,10 +344,10 @@ factory.AssignH(invoke.Priority{Group: 1, Order: 0.125}, fnBetween)
 // typed HTTP command interface
 table := invoke.NewCommandTable(engine, factory)
 invoke.Register[MyResult](table, "my-command",
-    invoke.Priority{Group: 2},
-    func(args map[string]string) (MyResult, error) {
-        return MyResult{Value: args["input"]}, nil
-    },
+invoke.Priority{Group: 2},
+func(args map[string]string) (MyResult, error) {
+return MyResult{Value: args["input"]}, nil
+},
 )
 table.Seal()
 

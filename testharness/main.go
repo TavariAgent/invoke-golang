@@ -21,10 +21,11 @@ const testPort = ":18432"
 
 func main() {
 	engine := invoke.NewEngine(invoke.Config{
-		IWorkers:  4,
-		PWorkers:  2,
-		Allocate:  invoke.AllocateAll,
-		LogEvents: invoke.LogDropped | invoke.LogLifecycle | invoke.LogCalibrate,
+		IWorkers:    4,
+		PWorkers:    2,
+		Allocate:    invoke.AllocateAll,
+		LogEvents:   invoke.LogDropped | invoke.LogLifecycle | invoke.LogCalibrate,
+		NotifyDrops: true,
 	})
 	engine.Start()
 	defer engine.Stop()
@@ -38,6 +39,11 @@ func main() {
 
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		RunServe(engine, factory)
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "drops" {
+		RunDropsDemo(engine, factory)
 		return
 	}
 
@@ -79,38 +85,62 @@ func section(name string) {
 func testProtocol(factory *invoke.Factory) {
 	ready := make(chan struct{})
 
-	factory.AssignP(func() {
+	err := factory.AssignP(func() {
 		ln, err := net.Listen("tcp", testPort)
 		if err != nil {
 			fmt.Printf("  [server] listen error: %v\n", err)
 			return
 		}
-		defer ln.Close()
+		defer func(ln net.Listener) {
+			err := ln.Close()
+			if err != nil {
+				fmt.Printf("  [server] close error: %v\n", err)
+			}
+		}(ln)
 		close(ready)
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func(conn net.Conn) {
+			err := conn.Close()
+			if err != nil {
+				fmt.Printf("  [server] close connection error: %v\n", err)
+			}
+		}(conn)
 		buf := make([]byte, 64)
 		n, _ := conn.Read(buf)
-		conn.Write(buf[:n])
+		_, err = conn.Write(buf[:n])
+		if err != nil {
+			return
+		}
 	})
+	if err != nil {
+		return
+	}
 
 	<-ready
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	factory.AssignP(func() {
+	_ = factory.AssignP(func() {
 		defer wg.Done()
 		conn, err := net.Dial("tcp", testPort)
 		if err != nil {
 			fmt.Printf("  [client] dial error: %v\n", err)
 			return
 		}
-		defer conn.Close()
+		defer func(conn net.Conn) {
+			err := conn.Close()
+			if err != nil {
+				fmt.Printf("  [client] close connection error: %v\n", err)
+			}
+		}(conn)
 		msg := []byte("invoke:handshake")
-		conn.Write(msg)
+		_, err = conn.Write(msg)
+		if err != nil {
+			return
+		}
 		buf := make([]byte, 64)
 		n, _ := conn.Read(buf)
 		fmt.Printf("  echo received : %s ✓\n\n", buf[:n])
@@ -127,12 +157,15 @@ func testSigValidator(factory *invoke.Factory) {
 
 	for range 8 {
 		wg.Add(1)
-		factory.AssignI(func() {
+		err := factory.AssignI(func() {
 			defer wg.Done()
 			mac := hmac.New(sha256.New, key)
 			mac.Write(msg)
 			_ = hex.EncodeToString(mac.Sum(nil))
 		})
+		if err != nil {
+			return
+		}
 	}
 	wg.Wait()
 	fmt.Println("  sig validator  : 8x HMAC-SHA256 ✓")
@@ -145,11 +178,14 @@ func testHashComposer(factory *invoke.Factory) {
 
 	for i, input := range inputs {
 		wg.Add(1)
-		factory.AssignI(func() {
+		err := factory.AssignI(func() {
 			defer wg.Done()
 			h := sha256.Sum256([]byte(input))
 			results[i] = hex.EncodeToString(h[:8])
 		})
+		if err != nil {
+			return
+		}
 	}
 	wg.Wait()
 	fmt.Printf("  hash composer  : %d digests — sample:%s... ✓\n", len(results), results[0])
@@ -162,12 +198,18 @@ func testSaltGenerator(factory *invoke.Factory) {
 
 	for i := range count {
 		wg.Add(1)
-		factory.AssignI(func() {
+		err := factory.AssignI(func() {
 			defer wg.Done()
 			b := make([]byte, 16)
-			rand.Read(b)
+			_, err := rand.Read(b)
+			if err != nil {
+				return
+			}
 			salts[i] = hex.EncodeToString(b)
 		})
+		if err != nil {
+			return
+		}
 	}
 	wg.Wait()
 	fmt.Printf("  salt generator : %d salts — sample:%s... ✓\n\n", count, salts[0][:16])
@@ -189,13 +231,16 @@ func testFibonacci(factory *invoke.Factory) {
 
 	for i, n := range inputs {
 		wg.Add(1)
-		factory.AssignH(invoke.Priority{Group: 1, Order: float64(i) * 0.1}, func() {
+		err := factory.AssignH(invoke.Priority{Group: 1, Order: float64(i) * 0.1}, func() {
 			defer wg.Done()
 			start := time.Now()
 			results[i] = fib(n)
 			fmt.Printf("  fib(%d) = %-12d [%s]\n",
 				n, results[i], time.Since(start).Round(time.Millisecond))
 		})
+		if err != nil {
+			return
+		}
 	}
 	wg.Wait()
 	fmt.Println()
@@ -205,7 +250,12 @@ func testFibonacci(factory *invoke.Factory) {
 
 func loadWords() []string {
 	if f, err := os.Open("testharness/words.txt"); err == nil {
-		defer f.Close()
+		defer func(f *os.File) {
+			err := f.Close()
+			if err != nil {
+				fmt.Printf("  [words] close error: %v\n", err)
+			}
+		}(f)
 		var words []string
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
@@ -291,7 +341,7 @@ func testDictionaryRace(factory *invoke.Factory) {
 			group, prefix := group, prefix
 			wg.Add(1)
 			totalTasks.Add(1)
-			factory.AssignI(func() {
+			err := factory.AssignI(func() {
 				defer wg.Done()
 				for _, w := range group {
 					if strings.HasPrefix(w, prefix) {
@@ -299,6 +349,9 @@ func testDictionaryRace(factory *invoke.Factory) {
 					}
 				}
 			})
+			if err != nil {
+				return
+			}
 		}
 
 		doneCh := make(chan struct{})

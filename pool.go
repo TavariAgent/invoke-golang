@@ -38,7 +38,7 @@ func (h hTaskHeap) Len() int      { return len(h) }
 func (h hTaskHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 func (h hTaskHeap) Less(i, j int) bool {
 	if h[i].priority.Group != h[j].priority.Group {
-		return h[i].priority.Group > h[j].priority.Group
+		return h[i].priority.Group < h[j].priority.Group
 	}
 	return h[i].priority.Order < h[j].priority.Order
 }
@@ -54,19 +54,18 @@ func (h *hTaskHeap) Pop() any {
 // --- iPool — dedicated idempotent workers -----------------------------------
 
 type iPool struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	queue   []iTask
-	stopCh  chan struct{}
-	engine  *Engine
-	dropped  atomic.Int64  // standard lane drops
-	rDropped atomic.Int64  // iCore receipt lane drops
+	mu       sync.Mutex
+	cond     *sync.Cond
+	queue    []iTask
+	stopCh   chan struct{}
+	engine   *Engine
+	dropped  atomic.Int64 // standard lane drops
+	rDropped atomic.Int64 // iCore receipt lane drops
 
 	// iCore — command receipt lane
 	rMu    sync.Mutex
 	rCond  *sync.Cond
 	rQueue []rTask
-
 }
 
 func (p *iPool) start(n int) {
