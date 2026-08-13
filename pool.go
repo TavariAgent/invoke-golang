@@ -34,13 +34,13 @@ type Priority struct {
 
 type hTaskHeap []hTask
 
-func (h hTaskHeap) Len() int      { return len(h) }
-func (h hTaskHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h hTaskHeap) Less(i, j int) bool {
-	if h[i].priority.Group != h[j].priority.Group {
-		return h[i].priority.Group < h[j].priority.Group
+func (h *hTaskHeap) Len() int      { return len(*h) }
+func (h *hTaskHeap) Swap(i, j int) { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
+func (h *hTaskHeap) Less(i, j int) bool {
+	if (*h)[i].priority.Group != (*h)[j].priority.Group {
+		return (*h)[i].priority.Group < (*h)[j].priority.Group
 	}
-	return h[i].priority.Order < h[j].priority.Order
+	return (*h)[i].priority.Order < (*h)[j].priority.Order
 }
 func (h *hTaskHeap) Push(x any) { *h = append(*h, x.(hTask)) }
 func (h *hTaskHeap) Pop() any {

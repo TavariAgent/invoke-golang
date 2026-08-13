@@ -72,7 +72,10 @@ func RunServe(engine *invoke.Engine, factory *invoke.Factory) {
 		func(args map[string]string) (PrimeResult, error) {
 			n := 100_000 + rand.Intn(1_000_000)
 			if v, ok := args["n"]; ok {
-				fmt.Sscanf(v, "%d", &n)
+				_, err := fmt.Sscanf(v, "%d", &n)
+				if err != nil {
+					return PrimeResult{}, err
+				}
 			}
 			start := time.Now()
 			result := isPrime(n)
@@ -90,7 +93,10 @@ func RunServe(engine *invoke.Engine, factory *invoke.Factory) {
 		func(args map[string]string) (FibResult, error) {
 			n := 35
 			if v, ok := args["n"]; ok {
-				fmt.Sscanf(v, "%d", &n)
+				_, err := fmt.Sscanf(v, "%d", &n)
+				if err != nil {
+					return FibResult{}, err
+				}
 			}
 			if n > 42 {
 				n = 42 // safety ceiling — fib blows up fast
@@ -131,11 +137,15 @@ func RunServe(engine *invoke.Engine, factory *invoke.Factory) {
 	// health
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		err := json.NewEncoder(w).Encode(map[string]any{
 			"status": "ok",
 			"cores":  runtime.NumCPU(),
 			"sealed": true,
 		})
+		if err != nil {
+			fmt.Println("error:", err)
+			return
+		}
 	})
 
 	fmt.Printf("── invoke server\n")
@@ -158,11 +168,15 @@ func RunServe(engine *invoke.Engine, factory *invoke.Factory) {
 	fmt.Printf("    curl http://localhost%s/command/ping\n", port)
 	fmt.Printf("    curl http://localhost%s/command/prime?n=999983\n", port)
 
-	http.ListenAndServe(port, mux)
+	err := http.ListenAndServe(port, mux)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 }
 
 // --- Ordering test — fires group 1 and group 3 concurrently ----------------
-// group 3 should always surface before group 1 in completions
+// group 1 primes cluster at lowest completed_us — they drain first by priority; group 3 pings surface only after all group-1 workers exhaust
 func runOrderingTest(table *invoke.CommandTable, factory *invoke.Factory, engine *invoke.Engine, w http.ResponseWriter) {
 	engine.Timer.Reset() // fresh origin for this test run
 	type entry struct {
@@ -177,22 +191,26 @@ func runOrderingTest(table *invoke.CommandTable, factory *invoke.Factory, engine
 	// flood hPool — 20 heavy primes spaced across Group 1
 	// Order: 0.05, 0.10, 0.15 ... 1.00 — deep sequence, all group 1
 	for i := range 20 {
-		i := i
 		order := float64(i+1) * 0.05
-		factory.AssignH(invoke.Priority{Group: 1, Order: order}, func() {
+		err := factory.AssignH(invoke.Priority{Group: 1, Order: order}, func() {
 			isPrime(7_999_999)
 			results <- entry{"prime", 1, order, engine.Timer.ReadUs()}
 		})
+		if err != nil {
+			fmt.Println("error:", err)
+			return
+		}
 	}
 
-	// pings at Group 3 — higher group jumps ALL group-1 slots
-	// Order spaces them within group 3 among themselves
 	for i := range 5 {
-		i := i
 		order := float64(i+1) * 0.1
-		factory.AssignH(invoke.Priority{Group: 3, Order: order}, func() {
+		err := factory.AssignH(invoke.Priority{Group: 3, Order: order}, func() {
 			results <- entry{"ping", 3, order, engine.Timer.ReadUs()}
 		})
+		if err != nil {
+			fmt.Println("error:", err)
+			return
+		}
 	}
 
 	collected := make([]entry, 0, 25)
@@ -201,8 +219,12 @@ func runOrderingTest(table *invoke.CommandTable, factory *invoke.Factory, engine
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	err := json.NewEncoder(w).Encode(map[string]any{
 		"note":    "group 3 pings should cluster at lowest completed_us — no sleep, just priority",
 		"results": collected,
 	})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 }

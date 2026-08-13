@@ -215,7 +215,7 @@ func RunDropsDemo(engine *invoke.Engine, factory *invoke.Factory) {
 			// digest, safe to retry on failure, no system state modified.
 			// AssignI takes no Priority — iPool is FIFO, not priority-scheduled.
 			wg.Add(1)
-			factory.AssignI(func() {
+			err := factory.AssignI(func() {
 				defer wg.Done()
 				h := sha256.Sum256([]byte(input))
 				mu.Lock()
@@ -224,6 +224,9 @@ func RunDropsDemo(engine *invoke.Engine, factory *invoke.Factory) {
 				notes = append(notes, "iPool: deterministic output, safe to retry — no Priority needed (FIFO)")
 				mu.Unlock()
 			})
+			if err != nil {
+				return ScatterResult{}, err
+			}
 
 			// pPool: simulates IO-class work. A real command might do DNS
 			// resolution or a TCP health check here. The sleep models the
@@ -231,7 +234,7 @@ func RunDropsDemo(engine *invoke.Engine, factory *invoke.Factory) {
 			// blocking here does not occupy an iPool or hPool worker slot.
 			// Compute-heavy work does NOT belong in pPool in production.
 			wg.Add(1)
-			factory.AssignP(func() {
+			if err := factory.AssignP(func() {
 				defer wg.Done()
 				time.Sleep(2 * time.Millisecond) // simulate syscall block
 				mu.Lock()
@@ -239,8 +242,10 @@ func RunDropsDemo(engine *invoke.Engine, factory *invoke.Factory) {
 				poolsRouted = append(poolsRouted, "pPool → 2ms IO sim + prime check")
 				notes = append(notes, "pPool: isolated — blocked goroutine cannot starve iPool or hPool workers")
 				mu.Unlock()
-			})
-
+			}); err != nil {
+				wg.Done() // unwind the Add before returning
+				return ScatterResult{}, err
+			}
 			wg.Wait()
 
 			// hPool (inline): matrix op runs directly in this goroutine — the
@@ -296,7 +301,11 @@ func RunDropsDemo(engine *invoke.Engine, factory *invoke.Factory) {
 	fmt.Printf("  curl http://localhost%s/test/drops\n", port)
 	fmt.Printf("  curl http://localhost%s/test/parity\n\n", port)
 
-	http.ListenAndServe(port, mux)
+	err := http.ListenAndServe(port, mux)
+	if err != nil {
+		fmt.Printf("invoke: server error: %v\n", err)
+		return
+	}
 }
 
 // runDropsTest ──────────────────────────────────────────────────────────────
@@ -332,7 +341,7 @@ func runDropsTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respons
 	for i := range jsonBatch {
 		wg.Add(1)
 		order := float64(i+1) * 0.05
-		factory.AssignH(invoke.Priority{Group: 1, Order: order}, func() {
+		err := factory.AssignH(invoke.Priority{Group: 1, Order: order}, func() {
 			defer wg.Done()
 			m := randomMatrix(3, 3)
 			sq := matSquare(m)
@@ -344,6 +353,9 @@ func runDropsTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respons
 				},
 			}
 		})
+		if err != nil {
+			return
+		}
 	}
 
 	// Batch B: transposed matrices at Group 3 — held in the heap until all
@@ -351,7 +363,7 @@ func runDropsTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respons
 	for i := range csvBatch {
 		wg.Add(1)
 		order := float64(i+1) * 0.05
-		factory.AssignH(invoke.Priority{Group: 3, Order: order}, func() {
+		err := factory.AssignH(invoke.Priority{Group: 3, Order: order}, func() {
 			defer wg.Done()
 			m := randomMatrix(3, 3)
 			t := matTranspose(m)
@@ -363,6 +375,9 @@ func runDropsTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respons
 				},
 			}
 		})
+		if err != nil {
+			return
+		}
 	}
 
 	// Intentional bad submissions — exercise the drop batcher.
@@ -400,7 +415,7 @@ func runDropsTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respons
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	err := json.NewEncoder(w).Encode(map[string]any{
 		"submitted":    jsonBatch + csvBatch + nilDrops + badDrops,
 		"completed":    jsonBatch + csvBatch,
 		"dropped":      dropped.Load(),
@@ -410,6 +425,9 @@ func runDropsTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respons
 		"csv_sample":   csvSample,
 		"elapsed":      time.Since(start).String(),
 	})
+	if err != nil {
+		return
+	}
 }
 
 // runParityTest ─────────────────────────────────────────────────────────────
@@ -453,9 +471,8 @@ func runParityTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respon
 	// Each task is distinguishable. The heap sequences them by Order.
 	// Completion timestamps should reflect this ordering.
 	for i := range 5 {
-		i := i
 		wg.Add(1)
-		factory.AssignH(invoke.Priority{Group: 1, Order: float64(i) * 0.1}, func() {
+		err := factory.AssignH(invoke.Priority{Group: 1, Order: float64(i) * 0.1}, func() {
 			defer wg.Done()
 			time.Sleep(500 * time.Microsecond)
 			results <- parityEntry{
@@ -466,6 +483,9 @@ func runParityTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respon
 				Condition:   "distinct Order — sequence is deterministic within group",
 			}
 		})
+		if err != nil {
+			return
+		}
 	}
 
 	// Set B — Group 3 (lowest priority), all at Order 0.0.
@@ -475,9 +495,8 @@ func runParityTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respon
 	// its internal ordering, which under concurrent push is effectively
 	// arbitrary. Completion order will not reliably match index order.
 	for i := range 5 {
-		i := i
 		wg.Add(1)
-		factory.AssignH(invoke.Priority{Group: 3, Order: 0.0}, func() {
+		err := factory.AssignH(invoke.Priority{Group: 3, Order: 0.0}, func() {
 			defer wg.Done()
 			time.Sleep(500 * time.Microsecond)
 			results <- parityEntry{
@@ -488,6 +507,9 @@ func runParityTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respon
 				Condition:   "PARITY — identical Group+Order, sequence undefined",
 			}
 		})
+		if err != nil {
+			return
+		}
 	}
 
 	wg.Wait()
@@ -499,11 +521,14 @@ func runParityTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respon
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	err := json.NewEncoder(w).Encode(map[string]any{
 		"parity_condition": "tasks with identical Group+Order are indistinguishable to the heap",
 		"consequence":      "execution order between equal-priority tasks is undefined — pipeline assumptions silently break",
 		"common_source":    "goroutines inside a command handler that submit to hPool with default Priority{} all land at Group:0 Order:0.0 — immediate parity across all of them",
 		"fix":              "always assign distinct Order values to tasks that must run in a defined sequence, even within the same Group",
 		"results":          collected,
 	})
+	if err != nil {
+		return
+	}
 }
