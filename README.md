@@ -6,6 +6,9 @@ A structured concurrency engine for Go. Invoke partitions work across three sema
 
 ---
 
+### ***Sorry about the package...***
+> The module was named incorrectly, I apologize for people who tried to `go get` this naturally since it wouldn't have worked. I set this down after making it with intent to return to it which I have and I'm currently building a new domain that will utilize this engine to produce git diffs from version ranges in pure html on demand.
+
 ## Install
 
     go get github.com/TavariAgent/invoke-golang
