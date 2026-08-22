@@ -144,6 +144,47 @@ func finalize(name string, expected reflect.Type, result any) (any, error) {
 	return result, nil
 }
 
+// Dispatch receives a packet from the TCP layer and executes the command.
+// Type gate: if the command was registered, its types passed at registration.
+// Format gate: Args and Payload are the sender's responsibility — we handle anything.
+func (ct *CommandTable) Dispatch(clientID string, pkt Packet) {
+	ct.mu.RLock()
+	cmd, ok := ct.commands[pkt.Command]
+	ct.mu.RUnlock()
+
+	if !ok {
+		ct.engine.emit(LogDropped, "invoke: dispatch — unknown command %q from %q", pkt.Command, clientID)
+		return
+	}
+
+	ct.factory.AssignH(cmd.priority, func() {
+		result, err := cmd.fn(pkt.Args)
+		if err != nil {
+			ct.engine.emit(LogDropped, "invoke: dispatch — %q error: %v", pkt.Command, err)
+			return
+		}
+		if result == nil {
+			return
+		}
+		data, err := json.Marshal(result)
+		if err != nil {
+			ct.engine.emit(LogDropped, "invoke: dispatch — marshal result for %q: %v", pkt.Command, err)
+			return
+		}
+		ct.factory.Push(clientID, Packet{
+			Command: pkt.Command,
+			Payload: data,
+		})
+	})
+}
+
+// Route sends a packet to any connected client by ID.
+// The command table is the routing authority — any client linked to it
+// can be reached from any command handler.
+func (ct *CommandTable) Route(targetID string, pkt Packet) error {
+	return ct.factory.Push(targetID, pkt)
+}
+
 func (ct *CommandTable) ServeHTTP(mux *http.ServeMux) {
 	// list available commands
 	mux.HandleFunc("/commands", func(w http.ResponseWriter, r *http.Request) {

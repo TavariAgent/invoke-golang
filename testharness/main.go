@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"invoke"
+	"github.com/tavariagent/invoke-golang"
 )
 
 const testPort = ":18432"

@@ -1,6 +1,16 @@
-# Invoke
+# invoke-golang
 
-A structured concurrency engine for Go. Invoke partitions work across three semantically distinct worker pools, routes tasks through a type-sealed command interface, and schedules priority work via a two-axis float coordinate system — all without dynamic allocation on the hot path.
+A typed task routing engine with priority scheduling and network interfaces for TCP, UDP, and HTTP.
+
+---
+
+invoke-golang is part of a broader polyglot engine project. Full documentation,
+usage examples, and integration guides will be released alongside the complete system in a new branch.
+
+The networking layer (TCP, UDP, HTTP page serving) is currently in active development.
+Documentation will reflect the validated implementation.
+
+For now the source is the documentation — the code is intentionally readable. All prior functionality unchanged.
 
 → [Quick Start](#quick-start)
 

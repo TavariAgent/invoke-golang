@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"time"
 
-	"invoke"
+	"github.com/tavariagent/invoke-golang"
 )
 
 // --- Typed result structs — T declared here, finalize checks against these ---
@@ -178,7 +178,7 @@ func RunServe(engine *invoke.Engine, factory *invoke.Factory) {
 // --- Ordering test — fires group 1 and group 3 concurrently ----------------
 // group 1 primes cluster at lowest completed_us — they drain first by priority; group 3 pings surface only after all group-1 workers exhaust
 func runOrderingTest(table *invoke.CommandTable, factory *invoke.Factory, engine *invoke.Engine, w http.ResponseWriter) {
-	engine.Timer.Reset() // fresh origin for this test run
+	engine.Timer().Reset() // fresh origin for this test run
 	type entry struct {
 		Command     string  `json:"command"`
 		Group       int     `json:"group"`
@@ -194,7 +194,7 @@ func runOrderingTest(table *invoke.CommandTable, factory *invoke.Factory, engine
 		order := float64(i+1) * 0.05
 		err := factory.AssignH(invoke.Priority{Group: 1, Order: order}, func() {
 			isPrime(7_999_999)
-			results <- entry{"prime", 1, order, engine.Timer.ReadUs()}
+			results <- entry{"prime", 1, order, engine.Timer().ReadUs()}
 		})
 		if err != nil {
 			fmt.Println("error:", err)
@@ -205,7 +205,7 @@ func runOrderingTest(table *invoke.CommandTable, factory *invoke.Factory, engine
 	for i := range 5 {
 		order := float64(i+1) * 0.1
 		err := factory.AssignH(invoke.Priority{Group: 3, Order: order}, func() {
-			results <- entry{"ping", 3, order, engine.Timer.ReadUs()}
+			results <- entry{"ping", 3, order, engine.Timer().ReadUs()}
 		})
 		if err != nil {
 			fmt.Println("error:", err)

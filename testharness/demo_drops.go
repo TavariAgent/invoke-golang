@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"invoke"
+	"github.com/tavariagent/invoke-golang"
 )
 
 // ── Typed result structs ────────────────────────────────────────────────────
@@ -463,7 +463,7 @@ func runParityTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respon
 		Condition   string  `json:"condition"`
 	}
 
-	engine.Timer.Reset()
+	engine.Timer().Reset()
 	results := make(chan parityEntry, 10)
 	var wg sync.WaitGroup
 
@@ -479,7 +479,7 @@ func runParityTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respon
 				Index:       i,
 				Group:       1,
 				Order:       float64(i) * 0.1,
-				CompletedUs: engine.Timer.ReadUs(),
+				CompletedUs: engine.Timer().ReadUs(),
 				Condition:   "distinct Order — sequence is deterministic within group",
 			}
 		})
@@ -503,7 +503,7 @@ func runParityTest(factory *invoke.Factory, engine *invoke.Engine, w http.Respon
 				Index:       i + 5,
 				Group:       3,
 				Order:       0.0,
-				CompletedUs: engine.Timer.ReadUs(),
+				CompletedUs: engine.Timer().ReadUs(),
 				Condition:   "PARITY — identical Group+Order, sequence undefined",
 			}
 		})

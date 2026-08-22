@@ -24,10 +24,7 @@ func newFracTimer() *FracTimer {
 	a := time.Now()
 	for time.Now().Equal(a) {
 	}
-	ft.tickUs = time.Since(a).Microseconds()
-	if ft.tickUs < 1 {
-		ft.tickUs = 1
-	}
+	ft.tickUs = max(time.Since(a).Microseconds(), 1)
 
 	ft.start = time.Now()
 	return ft

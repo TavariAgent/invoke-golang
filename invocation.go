@@ -4,8 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"runtime"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // --- Sentinel Errors --------------------------------------------------------
@@ -60,21 +64,30 @@ type Config struct {
 	LogDir        string        // defaults to ./invoke-logs if empty
 	NotifyDrops   bool          // false by default — terminal stays silent
 	LogBufferSize int           // log channel depth — defaults to 512
+	TCPAddr       string        // ":7777" — empty disables TCP listener
+	UDPAddr       string        // ":7778" — empty disables UDP listener
+	HTTPAddr      string        // ":8080" — empty disables HTTP server
 }
 
 // --- Engine -----------------------------------------------------------------
 
 type Engine struct {
-	cfg     Config
-	running atomic.Bool
-	stopCh  chan struct{}
-	logCh   chan logEntry
-	logger  Logger
-	batcher *dropBatcher
-	iPool   *iPool
-	pPool   *pPool
-	hPool   *hPool
-	Timer   *FracTimer
+	cfg        Config
+	running    atomic.Bool
+	stopCh     chan struct{}
+	logCh      chan logEntry
+	logger     Logger
+	batcher    *dropBatcher
+	iPool      *iPool
+	pPool      *pPool
+	hPool      *hPool
+	timer      *FracTimer
+	connection sync.Map
+	tcpLn      net.Listener
+	udpConn    *net.UDPConn
+	table      *CommandTable
+	httpSrv    *http.Server
+	pages      sync.Map // key → []byte, preloaded at startup
 }
 
 func NewEngine(cfg Config) *Engine {
@@ -98,8 +111,12 @@ func NewEngine(cfg Config) *Engine {
 	return e
 }
 
+func (e *Engine) AttachTable(ct *CommandTable) {
+	e.table = ct
+}
+
 func (e *Engine) Start() {
-	e.Timer = newFracTimer() // calibrate before anything else runs
+	e.timer = newFracTimer() // calibrate before anything else runs
 	if e.logger != nil {
 		go e.runLogger()
 	}
@@ -115,7 +132,21 @@ func (e *Engine) Start() {
 	e.emit(LogLifecycle,
 		"invoke: engine started — cores:%d iworkers:%d pworkers:%d workers:%d tick:%dµs",
 		runtime.NumCPU(), e.cfg.IWorkers, e.cfg.PWorkers,
-		e.resolveWorkers(), e.Timer.TickUs())
+		e.resolveWorkers(), e.timer.TickUs())
+	if e.cfg.TCPAddr != "" {
+		go e.serveTCP()
+	}
+	if e.cfg.UDPAddr != "" {
+		go e.serveUDP()
+	}
+}
+
+const ackTimeout = 50 * time.Millisecond // real client responds immediately
+
+type connEntry struct {
+	conn  net.Conn
+	mu    sync.Mutex // one writer at a time — serializes Push calls
+	ackCh chan byte  // reader goroutine drops 0 or 1 here
 }
 
 func (e *Engine) resolveICoreWorkers() int {
@@ -127,13 +158,29 @@ func (e *Engine) resolveICoreWorkers() int {
 
 func (e *Engine) Stop() {
 	e.running.Store(false)
+	if e.tcpLn != nil {
+		if err := e.tcpLn.Close(); err != nil {
+			e.emit(LogDropped, "invoke: TCP listener close: %v", err)
+			// continue — pools must still stop
+		}
+	}
+	if e.udpConn != nil {
+		if err := e.udpConn.Close(); err != nil {
+			e.emit(LogDropped, "invoke: UDP conn close: %v", err)
+		}
+	}
+	if e.httpSrv != nil {
+		if err := e.httpSrv.Close(); err != nil {
+			e.emit(LogDropped, "invoke: HTTP server close: %v", err)
+		}
+	}
 	e.iPool.stop()
 	e.pPool.stop()
 	e.hPool.stop()
 	e.emit(LogLifecycle, "invoke: engine stopped")
-	e.flushDropCounts()  // capture anything still in the counters
-	close(e.stopCh)      // signal all goroutines including drop flusher
-	e.batcher.flushNow() // write immediately, don't wait for the 2s timer
+	e.flushDropCounts()
+	close(e.stopCh)
+	e.batcher.flushNow()
 }
 
 func (e *Engine) resolveWorkers() int {
@@ -160,9 +207,43 @@ func (e *Engine) resolveWorkers() int {
 
 // --- Internal ---------------------------------------------------------------
 
+// Packet is the canonical wire type — everything on the wire is this.
+// Push encodes it, the TCP listener decodes it. Both sides compile against
+// the same struct so the format is never ambiguous.
+type Packet struct {
+	Command string            `json:"cmd"`
+	Args    map[string]string `json:"args,omitempty"`
+	Ts      int64             `json:"ts"`                // FracTimer.ReadUs() — ordering authority
+	Payload []byte            `json:"payload,omitempty"` // bin data when present
+}
+
 type logEntry struct {
 	event LogEvent
 	msg   string
+}
+
+func (e *Engine) register(clientID string, conn net.Conn) *connEntry {
+	entry := &connEntry{
+		conn:  conn,
+		ackCh: make(chan byte, 1), // buffered — reader never blocks on this
+	}
+	e.connection.Store(clientID, entry)
+	e.emit(LogLifecycle, "invoke: client %q connected", clientID)
+	return entry
+}
+
+func (e *Engine) unregister(clientID string) {
+	if val, ok := e.connection.LoadAndDelete(clientID); ok {
+		entry := val.(*connEntry)
+		entry.mu.Lock() // wait for any write to finish first
+		err := entry.conn.Close()
+		entry.mu.Unlock()
+		if err != nil {
+			e.emit(LogDropped, "invoke: close error for %q: %v", clientID, err)
+			return
+		}
+		e.emit(LogLifecycle, "invoke: client %q disconnected", clientID)
+	}
 }
 
 func (e *Engine) emit(event LogEvent, format string, args ...any) {
@@ -202,6 +283,11 @@ func (e *Engine) runLogger() {
 			}
 		}
 	}
+}
+
+// Timer returns the engine's calibrated fractional timer.
+func (e *Engine) Timer() *FracTimer {
+	return e.timer
 }
 
 func (e *Engine) SilenceTerminal() { e.batcher.Silence() }

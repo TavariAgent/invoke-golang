@@ -1,5 +1,12 @@
 package invoke
 
+import (
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
 // --- Factory ----------------------------------------------------------------
 
 type Factory struct {
@@ -69,4 +76,50 @@ func (f *Factory) validatePriority(p Priority) error {
 		return ErrInvalidPriority
 	}
 	return nil
+}
+
+func (f *Factory) Push(clientID string, pkt Packet) error {
+	val, ok := f.engine.connection.Load(clientID)
+	if !ok {
+		f.engine.emit(LogDropped, "invoke: push — %q not connected", clientID)
+		return fmt.Errorf("invoke: client %q not connected", clientID)
+	}
+	entry := val.(*connEntry)
+
+	pkt.Ts = f.engine.timer.ReadUs()
+	data, err := json.Marshal(pkt)
+	if err != nil {
+		return fmt.Errorf("invoke: push marshal: %w", err)
+	}
+
+	buf := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(buf[:4], uint32(len(data)))
+	copy(buf[4:], data)
+
+	return f.AssignP(func() {
+		entry.mu.Lock()
+		defer entry.mu.Unlock()
+		f.send(entry, buf)
+	})
+}
+
+func (f *Factory) send(entry *connEntry, buf []byte) {
+	if _, err := entry.conn.Write(buf); err != nil {
+		f.engine.emit(LogDropped, "invoke: write failed: %v", err)
+		return
+	}
+	select {
+	case ack := <-entry.ackCh:
+		if ack == 0 {
+			f.engine.emit(LogDropped, "invoke: ack=0 — resending once")
+			if _, err := entry.conn.Write(buf); err != nil {
+				f.engine.emit(LogDropped, "invoke: resend failed (ack=0): %v", err)
+			}
+		}
+	case <-time.After(ackTimeout):
+		f.engine.emit(LogDropped, "invoke: ack timeout — resending once")
+		if _, err := entry.conn.Write(buf); err != nil {
+			f.engine.emit(LogDropped, "invoke: resend failed (timeout): %v", err)
+		}
+	}
 }

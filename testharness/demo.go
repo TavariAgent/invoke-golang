@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"invoke"
+	"github.com/tavariagent/invoke-golang"
 )
 
 // --- Task descriptors -------------------------------------------------------
